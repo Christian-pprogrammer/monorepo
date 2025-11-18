@@ -33,7 +33,7 @@ services:
     ports:
       - "1337:1337"
     environment:
-      - NODE_ENV=production
+      - NODE_ENV=development
     env_file:
       - ./config/backend.env
     depends_on:
@@ -49,7 +49,7 @@ services:
       dockerfile: Dockerfile
     container_name: email-spider-worker
     environment:
-      - NODE_ENV=production
+      - NODE_ENV=development
     env_file:
       - ./config/worker.env
     depends_on:
@@ -66,7 +66,7 @@ services:
       dockerfile: Dockerfile
     container_name: email-spider-cli
     environment:
-      - NODE_ENV=production
+      - NODE_ENV=development
     env_file:
       - ./config/cli.env
     depends_on:
