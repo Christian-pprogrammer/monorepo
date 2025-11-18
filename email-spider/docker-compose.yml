@@ -1,0 +1,43 @@
+version: "3.8"
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: email-spider-redis
+    ports: ["6379:6379"]
+    volumes: [redis_data:/data]
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: email-spider-db
+    environment:
+      POSTGRES_DB: emailspider
+      POSTGRES_USER: spideruser
+      POSTGRES_PASSWORD: securepassword123
+    ports: ["5432:5432"]
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    container_name: email-spider-backend
+    ports: ["1337:1337"]
+    environment:
+      - NODE_ENV=production
+    env_file: ./backend/.env
+    depends_on: [redis, postgres]
+    restart: unless-stopped
+
+  worker:
+    build: ./worker
+    container_name: email-spider-worker
+    environment:
+      - NODE_ENV=production
+    env_file: ./worker/.env
+    depends_on: [redis, postgres]
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  postgres_data:

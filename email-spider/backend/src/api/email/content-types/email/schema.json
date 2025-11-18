@@ -1,0 +1,26 @@
+{
+  "kind": "collectionType",
+  "collectionName": "emails",
+  "info": {
+    "singularName": "email",
+    "pluralName": "emails",
+    "displayName": "Email",
+    "description": ""
+  },
+  "options": {
+    "draftAndPublish": false
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "result": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "api::result.result",
+      "inversedBy": "emails"
+    },
+    "email": {
+      "type": "email",
+      "unique": true
+    }
+  }
+}

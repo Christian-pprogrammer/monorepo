@@ -1,0 +1,96 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: email-spider-db
+    environment:
+      POSTGRES_DB: emailspider
+      POSTGRES_USER: spideruser
+      POSTGRES_PASSWORD: securepassword123
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: email-spider-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+
+  backend:
+    build: 
+      context: ./email-spider/backend
+      dockerfile: Dockerfile
+    container_name: email-spider-backend
+    ports:
+      - "1337:1337"
+    environment:
+      - NODE_ENV=production
+    env_file:
+      - ./config/backend.env
+    depends_on:
+      - redis
+      - postgres
+    volumes:
+      - ./data/uploads:/app/public/uploads
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./email-spider/worker
+      dockerfile: Dockerfile
+    container_name: email-spider-worker
+    environment:
+      - NODE_ENV=production
+    env_file:
+      - ./config/worker.env
+    depends_on:
+      - redis
+      - postgres
+      - backend
+    volumes:
+      - ./data/scraped:/app/output  # ← Mount to a subdirectory
+    restart: unless-stopped
+
+  cli:
+    build:
+      context: ./email-spider-cli
+      dockerfile: Dockerfile
+    container_name: email-spider-cli
+    environment:
+      - NODE_ENV=production
+    env_file:
+      - ./config/cli.env
+    depends_on:
+      - redis
+    volumes:
+      - ./data/scraped:/app/output  # ← Mount to a subdirectory
+    stdin_open: true
+    tty: true
+    profiles: ["cli"]
+
+  parser:
+    build:
+      context: ./parser
+      dockerfile: Dockerfile
+    container_name: email-spider-parser
+    volumes:
+      - ./data:/app/data
+    working_dir: /app/data
+    profiles: ["parser"]
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  default:
+    name: email-spider-network

@@ -1,0 +1,28 @@
+{
+  "kind": "collectionType",
+  "collectionName": "proxies",
+  "info": {
+    "singularName": "proxy",
+    "pluralName": "proxies",
+    "displayName": "Proxy",
+    "description": ""
+  },
+  "options": {
+    "draftAndPublish": false
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "ip": {
+      "type": "string"
+    },
+    "username": {
+      "type": "string"
+    },
+    "password": {
+      "type": "string"
+    },
+    "port": {
+      "type": "string"
+    }
+  }
+}
