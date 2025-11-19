@@ -1,25 +1,11 @@
 import dotenv from "dotenv";
-import type { Browser } from "puppeteer";
-import puppeteer from "puppeteer-extra";
-import AdBlocker from "puppeteer-extra-plugin-adblocker";
-import RecaptchaPlugin from "puppeteer-extra-plugin-recaptcha";
-import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import { client } from "./client";
+import axios from "axios";
+import * as cheerio from "cheerio";
+import * as fs from "fs";
+
 dotenv.config();
 
-puppeteer.use(StealthPlugin());
-
-puppeteer.use(
-  RecaptchaPlugin({
-    provider: {
-      id: "2captcha",
-      token: process.env.CAPTCHA_API_KEY,
-    },
-    visualFeedback: true,
-  })
-);
-
-type searchGoogleParams = {
+type SearchGoogleParams = {
   keyword: string;
   location?: string;
   site?: string;
@@ -32,209 +18,346 @@ type Result = {
 };
 
 export class GoogleCrawler {
-  browser: Browser;
+  apiKey: string;
+  searchEngineId: string;
   keyword: string;
-  initial: boolean = true;
-  done: boolean = false;
   results: Result[] = [];
+  emailRegex = /[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z]{2,}/g;
+  headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'
+  };
 
-  constructor() {}
-
-  async close() {
-    await this.browser.close();
-  }
-
-  async onTargetChanged(target) {
-    const page = await target.page();
-    const targetUrl = new URL(target.url());
-    const pathname = targetUrl.pathname;
-
-    if (pathname === "/sorry/index") {
-      console.log("Captcha detected! Attempting to solve..");
-      await page.solveRecaptchas();
-
-      console.log("Captcha solved!");
-    } else if (pathname === "/search" && this.initial) {
-      this.initial = false;
-      await page.waitForNavigation({
-        waitUntil: "networkidle2",
-      });
-      await this._crawlResults({
-        timeout: Number(process.env.TIMEOUT) || 1000,
-      });
+  constructor() {
+    this.apiKey = process.env.GOOGLE_API_KEY || '';
+    this.searchEngineId = process.env.GOOGLE_SEARCH_ENGINE_ID || '';
+    
+    if (!this.apiKey || !this.searchEngineId) {
+      throw new Error('Missing GOOGLE_API_KEY or GOOGLE_SEARCH_ENGINE_ID in environment variables');
     }
   }
 
   async isDone() {
-    await new Promise((resolve) => {
-      setInterval(() => {
-        if (this.done) {
-          resolve(true);
-        }
-      }, 1000);
-    });
+    // For backward compatibility - API approach completes synchronously
+    return Promise.resolve(true);
+  }
+
+  async close() {
+    // No browser to close anymore
+    console.log('Cleanup complete');
   }
 
   async initialize() {
-    const proxies = await client
-      .get("/api/proxies", {
-        headers: {
-          Authorization: `Bearer ${process.env.STRAPI_TOKEN}`,
-        },
-      })
-      .then(
-        (res) =>
-          res.data as {
-            data: {
-              attributes: {
-                ip: string;
-                port: number;
-                username: string;
-                password: string;
-              };
-            }[];
-          }
-      );
-
-    console.log("Available proxies: ", proxies.data.length);
-
-    const randomNo = Math.floor(Math.random() * proxies.data.length);
-    const proxy = proxies.data[randomNo];
-
-    console.log("Selected proxy: ", proxy);
-
-    console.log("Initializing browser...");
-
-    try {
-      const browserOptions = {
-        headless: process.env.HEADLESS === "false" ? false : true,
-        args: [
-          //
-          "--no-sandbox",
-          // "--disable-setuid-sandbox",
-          // `--proxy-server=${proxy.attributes.ip}:${proxy.attributes.port}`,
-        ],
-      };
-
-      console.log("Browser options: ", browserOptions);
-
-      this.browser = await puppeteer.launch(browserOptions);
-
-      console.log("Browser initialized!");
-
-      this.browser.on("targetchanged", this.onTargetChanged.bind(this));
-
-      const [page] = await this.browser.pages();
-
-      await page.setViewport({ width: 1920, height: 1080 });
-
-      await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36");
-
-      console.log("Setting up proxy authentication...");
-      await page.authenticate({
-        username: proxy.attributes.username,
-        password: proxy.attributes.password,
-      });
-      console.log("Proxy authentication setup!");
-    } catch (e) {
-      console.log(e);
-    }
+    console.log('Initializing Google Crawler with API...');
+    console.log('API Key:', this.apiKey.substring(0, 10) + '...');
+    console.log('Search Engine ID:', this.searchEngineId);
   }
 
-  async searchGoogle({ keyword, location, site }: searchGoogleParams) {
-    console.log(`Searching Google for "${keyword}"`);
-    const searchQuery = `${keyword} ` + `( @gmail.com OR @yahoo.com OR @hotmail.com ) ` + (location ? `in ${location} ` : "") + (site ? `site:${site}` : "");
+  /**
+   * Search Google using Custom Search API
+   */
+  async searchGoogle({ keyword, location, site }: SearchGoogleParams) {
+    console.log(`\n🔍 Searching Google for "${keyword}"`);
+    
+    // Build search query
+    let searchQuery = keyword;
+    
+    // Add email domains to search
+    searchQuery += ' (@gmail.com OR @yahoo.com OR @hotmail.com OR @outlook.com)';
+    
+    if (location) {
+      searchQuery += ` in ${location}`;
+    }
+    
+    if (site) {
+      searchQuery += ` site:${site}`;
+    }
+    
     this.keyword = keyword.replace(/\s+/g, "-");
-
-    const [page] = await this.browser.pages();
-    await page.goto("https://www.google.com");
-    const textarea = await page.$("textarea");
-    if (!textarea) {
-      console.error("Search area not found!");
-      return;
+    
+    console.log(`📝 Search query: "${searchQuery}"\n`);
+    
+    try {
+      // Get URLs from Google Custom Search API
+      const urls = await this._fetchSearchResults(searchQuery);
+      
+      if (urls.length === 0) {
+        console.log('❌ No URLs found from Google Search');
+        return;
+      }
+      
+      console.log(`\n✅ Found ${urls.length} URLs from Google\n`);
+      
+      // Crawl each URL for emails
+      await this._crawlResults(urls);
+      
+    } catch (error) {
+      console.error('Error during search:', error.message);
+      throw error;
     }
-    await textarea.type(searchQuery, { delay: 10 });
-    await page.keyboard.press("Enter");
-    console.log("Waiting for navigation...");
   }
 
-  _stripEmails(html): string[] {
-    const EMAIL_PATTERN = /([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+)/g;
-    const emails = html.match(EMAIL_PATTERN) as string[];
-    return Array.from(new Set(emails));
-  }
-
-  _isEndOfPage() {
-    const viewMoreButton = document.querySelector(".T7sFge.sW9g3e.VknLRd");
-    const spinner = document.querySelector(".QjmzCd");
-    if (viewMoreButton && spinner) {
-      const spinnerStyle = spinner.getAttribute("style");
-      const viewMoreButtonStyle = viewMoreButton.getAttribute("style");
-      if (spinnerStyle == "display: none;" && viewMoreButtonStyle == "transform: scale(0);") {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  async _crawlResults({ timeout = 1000 }: { timeout?: number }) {
-    console.log("Crawling results...");
-    console.log("Timeout: ", timeout);
-
-    const [page] = await this.browser.pages();
-
-    let counter = 0;
-    let windowScrollY = 0;
-    let prevWindowScrollY = -1;
-    let tries = 5;
-
-    while (!this.done) {
-      this.done = await page.evaluate(this._isEndOfPage);
-      console.log("Done: ", this.done);
-      console.log("Tries: ", tries);
-
-      if (prevWindowScrollY === windowScrollY) {
-        tries = tries - 1;
-      } else {
-        tries = 5;
-      }
-
-      prevWindowScrollY = windowScrollY;
-      windowScrollY = await page.evaluate(() => window.scrollY);
-
-      if (this.done || !tries) {
-        this.done = true;
-        break;
-      }
-
-      const viewMoreButton = await page.$(".T7sFge.sW9g3e.VknLRd");
-      const spinner = await page.$(".QjmzCd");
-
-      if (viewMoreButton && spinner) {
-        await viewMoreButton.scrollIntoView();
-
-        const buttonPosition = await viewMoreButton.boundingBox();
-        await page.mouse.click(buttonPosition!.x + buttonPosition!.width / 2, buttonPosition!.y + buttonPosition!.height / 2);
-
-        const contents = (await page.$$(".VwiC3b.yXK7lf.lVm3ye.r025kc.hJNv6b.Hdw6tb")).slice(counter);
-
-        console.log("Total contents: ", counter);
-        // console.log("Found contents: ", contents.length);
-
-        for (const content of contents) {
-          // access innerText
-          const html = await content.evaluate((node) => (node as any).innerText);
-          const emails = this._stripEmails(html).map((email) => (email.endsWith(".") ? email.slice(0, -1) : email));
-          this.results.push({
-            id: counter + 1,
-            emails,
-            description: html,
+  /**
+   * Fetch search results from Google Custom Search API
+   */
+  async _fetchSearchResults(query: string, maxResults: number = 10): Promise<Array<{url: string, title: string, snippet: string}>> {
+    const results: Array<{url: string, title: string, snippet: string}> = [];
+    
+    try {
+      // Google API returns max 10 results per request
+      const requestsNeeded = Math.ceil(maxResults / 10);
+      
+      for (let i = 0; i < requestsNeeded; i++) {
+        const startIndex = (i * 10) + 1;
+        const apiUrl = `https://www.googleapis.com/customsearch/v1`;
+        
+        const response = await axios.get(apiUrl, {
+          params: {
+            key: this.apiKey,
+            cx: this.searchEngineId,
+            q: query,
+            start: startIndex
+          }
+        });
+        
+        if (response.data.items) {
+          response.data.items.forEach(item => {
+            results.push({
+              url: item.link,
+              title: item.title,
+              snippet: item.snippet
+            });
           });
-          counter++;
+        }
+        
+        // If we got fewer results than requested, no point in asking for more
+        if (!response.data.items || response.data.items.length < 10) {
+          break;
         }
       }
-
-      await new Promise((resolve) => setTimeout(resolve, timeout));
+      
+      return results.slice(0, maxResults);
+      
+    } catch (error) {
+      if (error.response) {
+        console.error('❌ API Error:', error.response.data.error.message);
+        if (error.response.status === 429) {
+          console.error('Rate limit exceeded. You have 100 free searches per day.');
+        }
+      } else {
+        console.error('Error fetching search results:', error.message);
+      }
+      return [];
     }
   }
+
+  /**
+   * Extract emails from a webpage
+   */
+  async _extractEmailsFromUrl(url: string, title: string): Promise<string[]> {
+    try {
+      console.log(`📄 Scraping: ${url}`);
+      
+      const response = await axios.get(url, {
+        headers: this.headers,
+        timeout: 10000,
+        maxRedirects: 5
+      });
+      
+      const $ = cheerio.load(response.data);
+      
+      // Get text from body
+      const bodyText = $('body').text();
+      let emailsFromText = bodyText.match(this.emailRegex) || [];
+      
+      // Also check for mailto: links
+      const mailtoEmails: string[] = [];
+      $('a[href^="mailto:"]').each((i, elem) => {
+        const href = $(elem).attr('href');
+        if (href) {
+          const email = href.replace('mailto:', '').split('?')[0];
+          mailtoEmails.push(email);
+        }
+      });
+      
+      const allEmails = [...emailsFromText, ...mailtoEmails];
+      const uniqueEmails = [...new Set(allEmails)];
+      
+      // Filter out common false positives
+      const filteredEmails = uniqueEmails
+        .filter(email => 
+          !email.endsWith('.png') && 
+          !email.endsWith('.jpg') &&
+          !email.endsWith('.gif') &&
+          !email.endsWith('.svg') &&
+          !email.includes('example.com') &&
+          !email.includes('sentry.io') &&
+          !email.includes('wixpress.com') &&
+          email.length < 100
+        )
+        .map(email => email.endsWith('.') ? email.slice(0, -1) : email); // Remove trailing dots
+      
+      if (filteredEmails.length > 0) {
+        console.log(`  ✅ Found ${filteredEmails.length} email(s)`);
+      } else {
+        console.log(`  ℹ️  No emails found`);
+      }
+      
+      return filteredEmails;
+      
+    } catch (error) {
+      console.error(`  ❌ Error scraping ${url}: ${error.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * Strip emails from HTML content
+   */
+  _stripEmails(html: string): string[] {
+    const emails = html.match(this.emailRegex) || [];
+    return Array.from(new Set(emails)).map(email => 
+      email.endsWith('.') ? email.slice(0, -1) : email
+    );
+  }
+
+  /**
+   * Crawl all URLs and extract emails
+   */
+  async _crawlResults(urls: Array<{url: string, title: string, snippet: string}>) {
+    console.log('🔄 Starting to crawl websites...\n');
+    
+    let counter = 0;
+    const timeout = Number(process.env.TIMEOUT) || 2000;
+    
+    for (const urlData of urls) {
+      console.log(`[${counter + 1}/${urls.length}]`);
+      
+      const emails = await this._extractEmailsFromUrl(urlData.url, urlData.title);
+      
+      // Also check snippet for emails
+      const snippetEmails = this._stripEmails(urlData.snippet);
+      const allEmails = [...new Set([...emails, ...snippetEmails])];
+      
+      if (allEmails.length > 0) {
+        this.results.push({
+          id: counter + 1,
+          emails: allEmails,
+          description: urlData.snippet
+        });
+      }
+      
+      counter++;
+      
+      // Add delay between requests to be polite
+      await new Promise(resolve => setTimeout(resolve, timeout));
+      console.log('');
+    }
+    
+    console.log('\n✅ Crawling complete!\n');
+  }
+
+  /**
+   * Display results in console
+   */
+  displayResults() {
+    console.log('=' .repeat(80));
+    console.log('\n📧 RESULTS\n');
+    console.log('=' .repeat(80) + '\n');
+    
+    if (this.results.length === 0) {
+      console.log('❌ No emails found.');
+      return;
+    }
+    
+    let totalEmails = 0;
+    this.results.forEach((result) => {
+      console.log(`\n${result.id}.`);
+      console.log(`   📧 Emails found: ${result.emails.length}`);
+      result.emails.forEach(email => {
+        console.log(`      • ${email}`);
+      });
+      console.log(`   📝 ${result.description.substring(0, 100)}...`);
+      totalEmails += result.emails.length;
+    });
+    
+    console.log('\n' + '=' .repeat(80));
+    console.log(`\n✅ Total emails found: ${totalEmails}`);
+    console.log(`✅ Websites with emails: ${this.results.length}`);
+    console.log('\n' + '=' .repeat(80) + '\n');
+  }
+
+  /**
+   * Save results to JSON file
+   */
+  saveResults(filename?: string) {
+    const outputFile = filename || `${this.keyword}-emails.json`;
+    
+    const data = {
+      timestamp: new Date().toISOString(),
+      keyword: this.keyword,
+      totalEmails: this.results.reduce((sum, r) => sum + r.emails.length, 0),
+      totalWebsites: this.results.length,
+      results: this.results
+    };
+    
+    fs.writeFileSync(outputFile, JSON.stringify(data, null, 2));
+    console.log(`💾 Results saved to ${outputFile}\n`);
+    
+    return outputFile;
+  }
+
+  /**
+   * Export emails to CSV
+   */
+  exportToCSV(filename?: string) {
+    const outputFile = filename || `${this.keyword}-emails.csv`;
+    
+    let csv = 'ID,Email,Description\n';
+    
+    this.results.forEach(result => {
+      result.emails.forEach(email => {
+        const description = result.description.replace(/"/g, '""').replace(/\n/g, ' ');
+        csv += `${result.id},"${email}","${description}"\n`;
+      });
+    });
+    
+    fs.writeFileSync(outputFile, csv);
+    console.log(`📊 CSV exported to ${outputFile}\n`);
+    
+    return outputFile;
+  }
+
+  /**
+   * Get all unique emails
+   */
+  getAllEmails(): string[] {
+    const allEmails = this.results.flatMap(r => r.emails);
+    return [...new Set(allEmails)];
+  }
 }
+
+// Example usage
+async function main() {
+  const crawler = new GoogleCrawler();
+  
+  await crawler.initialize();
+  
+  await crawler.searchGoogle({
+    keyword: 'tech startups San Francisco',
+    // location: 'San Francisco',
+    // site: 'linkedin.com'
+  });
+  
+  crawler.displayResults();
+  crawler.saveResults();
+  crawler.exportToCSV();
+  
+  await crawler.close();
+}
+
+// Run if executed directly
+if (require.main === module) {
+  main().catch(console.error);
+}
+
+export default GoogleCrawler;
